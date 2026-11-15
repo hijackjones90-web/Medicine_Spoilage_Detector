@@ -6,7 +6,14 @@ from PIL import Image
 import io
 import os
 
-os.environ["MODAL_ENDPOINT_URL"] = "https://vishalsv2205--biochem-spoilage-detect-vlminference-analyze.modal.run"
+# Configure VLM endpoint: Kaggle GPU or local Ollama
+KAGGLE_VLM_URL = os.environ.get("KAGGLE_VLM_URL", "")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+if not KAGGLE_VLM_URL:
+    os.environ["MODAL_ENDPOINT_URL"] = f"{OLLAMA_HOST}/api/generate"
+else:
+    os.environ["MODAL_ENDPOINT_URL"] = KAGGLE_VLM_URL
 
 # Create a test image (orange liquid like Jectocos Lipo)
 img = Image.new("RGB", (200, 200), color=(255, 140, 50))

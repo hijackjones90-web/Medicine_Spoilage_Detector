@@ -1,6 +1,6 @@
 # Drug Spoilage Detector
 
-Detects medicine spoilage from images of syrup bottles and drug packaging using **MiniCPM-V 2.6 INT4** (8B params, bitsandbytes quantized) served via Modal. Upload a photo, crop to the label area to reduce visual tokens, and get a full spoilage analysis.
+Detects medicine spoilage from images of syrup bottles and drug packaging using **Qwen2.5-VL 7B** (7B params, 4-bit quantized) served via free cloud GPU (Kaggle/Colab) or local Ollama. Upload a photo, crop to the label area to reduce visual tokens, and get a full spoilage analysis.
 
 ## What it does
 
@@ -15,9 +15,9 @@ Detects medicine spoilage from images of syrup bottles and drug packaging using 
 
 ## Tech Stack
 
-- **Model:** `openbmb/MiniCPM-V-2_6` (8B params, runtime INT4 quantized) served via vLLM on Modal
-- **Frontend:** Gradio 6.17.3 on HuggingFace Spaces
-- **Backend:** Modal serverless GPU (L4) with auto-scaling
+- **Model:** Qwen2.5-VL 7B (7B params, runtime INT4 quantized) served via vLLM on free cloud GPU
+- **Frontend:** Gradio 4.+ on HuggingFace Spaces
+- **Backend:** Kaggle GPU notebook (30 GPU-hrs/week free) OR local Ollama CPU
 - **Charts:** Plotly (interactive)
 - **Image Preprocessing:** Contrast enhancement + sharpening for medicine labels
 

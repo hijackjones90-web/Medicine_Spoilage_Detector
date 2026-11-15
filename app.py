@@ -1,6 +1,6 @@
 """Drug Spoilage Detector — Main Gradio App.
 
-Detects medicine spoilage from images using MiniCPM-V 2.6 via Modal.
+Detects medicine spoilage from images using MiniCPM-V 2.6 via cloud VLM.
 Upload photos of a medicine to detect spoilage, visualize chemical
 composition, estimate bacteria growth, and compare expiry dates.
 
@@ -19,13 +19,6 @@ import gradio as gr
 from PIL import Image
 
 from src.engine import analyze_image
-from src.utils import (
-    parse_date,
-    calculate_spoilage_score,
-    get_spoilage_verdict,
-    get_verdict_color,
-    enrich_chemicals,
-)
 from src.visualization import (
     create_chemical_bar_chart,
     create_spoilage_timeline,
@@ -383,7 +376,7 @@ with gr.Blocks(title="Drug Spoilage Detector") as demo:
     gr.HTML("""
     <div class="header-banner">
         <h1>Drug Spoilage Detector</h1>
-        <p>Powered by MiniCPM-V 2.6 INT4 (8B params) on Modal</p>
+        <p>Powered by Qwen2.5-VL 7B (7B params) on free cloud GPU</p>
     </div>
     """)
 
@@ -466,7 +459,7 @@ with gr.Blocks(title="Drug Spoilage Detector") as demo:
         """
         ---
         Built for [Build Small Hackathon](https://huggingface.co/build-small-hackathon) — Track 1: Backyard AI.
-        Model: `openbmb/MiniCPM-V-2_6-int4` (8B params) served via Modal. Inference runs on Modal GPUs.
+        Model: `Qwen/Qwen2.5-VL-7B-Instruct` (7B params) served via free cloud GPU (Kaggle/Colab) or local Ollama.
         """
     )
 
