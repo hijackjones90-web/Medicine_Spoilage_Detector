@@ -15,10 +15,12 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
+import os
+
 import gradio as gr
 from PIL import Image
 
-from src.engine import analyze_image
+from src.engine import analyze_image, analyze_image_qwen
 from src.visualization import (
     create_chemical_bar_chart,
     create_spoilage_timeline,
@@ -28,6 +30,12 @@ from src.visualization import (
     create_dynamic_expiry_comparison,
     create_risk_radar,
 )
+
+
+# --- Qwen VL + Deepseek R1 orchestrator mode ---
+# Set USE_QWEN_VLM=1 to use the Qwen VL cloud endpoint + Deepseek R1
+# orchestrator instead of the MiniCPM-V Modal endpoint.
+USE_QWEN_VLM = os.environ.get("USE_QWEN_VLM", "0") == "1"
 
 
 def preprocess_uploaded_images(images) -> list:
@@ -283,7 +291,11 @@ def process_images(images, user_text: str):
         ]
 
     processed_images = preprocess_uploaded_images(images)
-    result = analyze_image(processed_images, user_text=user_text)
+
+    if USE_QWEN_VLM:
+        result = analyze_image_qwen(processed_images, user_text=user_text)
+    else:
+        result = analyze_image(processed_images, user_text=user_text)
     return extract_drug_outputs(result)
 
 
@@ -376,7 +388,7 @@ with gr.Blocks(title="Drug Spoilage Detector") as demo:
     gr.HTML("""
     <div class="header-banner">
         <h1>Drug Spoilage Detector</h1>
-        <p>Powered by Qwen2.5-VL 7B (7B params) on free cloud GPU</p>
+        <p>Powered by Qwen2.5-VL 7B (cloud VLM) + Deepseek R1 distill orchestrator</p>
     </div>
     """)
 
