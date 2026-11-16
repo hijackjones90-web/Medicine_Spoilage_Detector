@@ -1,7 +1,7 @@
 """Orchestration layer for Drug Spoilage Detector.
 
 Architecture:
-  VLM (Qwen2.5-VL-7B on Modal) — OCR extraction + structured analysis (4 parallel prompts)
+  VLM (Qwen2.5-VL-7B on HF Spaces ZeroGPU) — OCR extraction + structured analysis (4 parallel prompts)
   Orchestrator (Deepseek-R1-Distill-Qwen-7B on HF Spaces ZeroGPU) — single synthesis call
   Python fallbacks (utils.py) — bacteria growth, color analysis, dynamic expiry
 
@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 import requests
 from PIL import Image
 
-from src.sagemaker_client import (
+from src.vlm_client import (
     _image_to_base64,
     _preprocess_images_for_medicine,
     _extract_json,
@@ -199,7 +199,7 @@ class Orchestrator:
         return result
 
     # ------------------------------------------------------------------
-    # VLM pipeline (same as engine, delegated to Modal/Qwen2.5-VL)
+    # VLM pipeline (same as engine, delegated to HF ZeroGPU/Qwen2.5-VL)
     # ------------------------------------------------------------------
 
     def _run_prompt_with_retry(self, images: list, prompt: str) -> str:

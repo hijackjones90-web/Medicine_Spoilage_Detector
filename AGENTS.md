@@ -8,10 +8,10 @@ Submission deadline: **June 15, 2026**.
 
 ## Tech Stack
 
-- **VLM Model:** `Qwen/Qwen2.5-VL-7B-Instruct` (7B params, runtime bitsandbytes INT4 quantized, served via AWS SageMaker)
+- **VLM Model:** `Qwen/Qwen2.5-VL-7B-Instruct` (7B params, runtime bitsandbytes INT4 quantized, served via HF Spaces ZeroGPU)
 - **Orchestrator Model:** `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` (7B params, INT4, running on HF Spaces ZeroGPU)
 - **Frontend:** Gradio 6.17.3 on HuggingFace Spaces
-- **VLM Backend:** AWS SageMaker GPU instance with vLLM inference
+- **VLM Backend:** HuggingFace Spaces ZeroGPU (T4) with vLLM inference
 - **Orchestrator Backend:** HuggingFace Spaces ZeroGPU (T4) with transformers inference
 - **Python:** 3.13
 - **Charts:** Plotly (interactive, renders in `gr.Plot`)
@@ -20,21 +20,21 @@ Submission deadline: **June 15, 2026**.
 ## Architecture
 
 ```
-HF Spaces (Gradio)                         AWS SageMaker                HF Spaces ZeroGPU (T4)
-┌──────────────────────┐         HTTPS POST ┌──────────────────┐  HTTPS POST ┌──────────────────────┐
-│  app.py              │         JSON resp  │  backend.py      │  JSON resp  │  DeepSeek-R1-        │
-│  orchestrator.py  ───┼──────────┬───────►│  vLLM + Qwen2.5- │────────────►│  Distill-Qwen-7B     │
-│  (calls engine.py)   │          │        │  VL-7B           │             │  INT4                │
-│  llm_client.py ──────┼──────────┘        │  INT4, L4 GPU    │             │  @spaces/ZeroGPU     │
-│  prompts.py          │◄─────────┴─────────│  scales to 0     │◄────────────│  synthesis only      │
-│  utils.py            │                     └──────────────────┘             └──────────────────────┘
+HF Spaces (Gradio)                        HF Spaces ZeroGPU (T4)
+┌──────────────────────┐         HTTPS POST ┌──────────────────────┐  HTTPS POST ┌──────────────────────┐
+│  app.py              │         JSON resp  │  vlm_client.py       │  JSON resp  │  DeepSeek-R1-        │
+│  orchestrator.py  ───┼──────────┬────────►│  vLLM + Qwen2.5-     │────────────►│  Distill-Qwen-7B     │
+│  (calls engine.py)   │          │        │  VL-7B INT4         │             │  INT4                │
+│  llm_client.py ──────┼──────────┘        │  @spaces/ZeroGPU    │◄────────────│  @spaces/ZeroGPU     │
+│  prompts.py          │◄─────────┴─────────│  scales to 0       │             │  synthesis only       │
+│  utils.py            │                     └──────────────────────┘             └──────────────────────┘
 │  visualization.py    │
 └──────────────────────┘
 ```
 
 - **Frontend** (HF Spaces): Gradio UI, chart generation, spoilage scoring — no GPU needed
-- **Backend** (AWS SageMaker): VLM inference only — spins up on request, scales to 0 when idle
-- **Communication:** Base64-encoded JPEG images sent via HTTPS to SageMaker endpoint (single image, cropped to label via ImageEditor)
+- **Backend** (HF Spaces ZeroGPU): VLM inference only — spins up on request, scales to 0 when idle
+- **Communication:** Base64-encoded JPEG images sent via HTTPS OpenAI-compatible API to the VLM ZeroGPU endpoint (single image, cropped to label via ImageEditor)
 
 ## Hackathon Constraints
 
@@ -43,11 +43,11 @@ HF Spaces (Gradio)                         AWS SageMaker                HF Space
 | Max model params | ≤ 32B (we use 8B, INT4 quantized) |
 | App type | Gradio on HuggingFace Spaces |
 | Submission | Space link + demo video + social post |
-| No cloud APIs | Inference runs on Modal GPU (not a cloud API service like OpenAI) |
+| No cloud APIs | Inference runs on HF Spaces ZeroGPU (not a cloud API service like OpenAI) |
 
 ### Merit Badges Targeted
 
-- **Off the Grid** — inference runs on Modal GPU (no third-party API service)
+- **Off the Grid** — inference runs on HF Spaces ZeroGPU (no third-party API service)
 - **Sharing is Caring** — publish agent trace to HF Hub
 - **Off-Brand** — custom Gradio theme via `gr.themes`
 
@@ -61,16 +61,16 @@ src/
 ├── orchestrator.py # Orchestrator class + analyze_image() drop-in replacement
 ├── llm_client.py   # Deepseek-R1 client with reasoning strip
                      (remote via ZeroGPU endpoint or local transformers)
-├── sagemaker_client.py  # SageMaker HTTPS client for VLM inference (wrapper for API calls)
-├── engine.py       # HTTPS client that calls SageMaker endpoint (two-pass pipeline)
+├── vlm_client.py   # HF ZeroGPU VLM client (OpenAI-compatible /v1/chat/completions)
+├── engine.py       # HTTPS client that calls VLM endpoint (two-pass pipeline)
                      (low-level VLM client, now called by the orchestrator)
 ├── prompts.py      # VLM prompt templates with OCR context injection
 ├── utils.py        # Date parsing, chemical reference DB, spoilage scoring
 └── visualization.py # Plotly charts: chemical bar, timeline, gauge, radar
-+── deploy_sagemaker.py  # SageMaker deployment script (handles container setup, dependencies, and model serving)
++── deploy_sagemaker.py  # SageMaker deployment script (deprecated — replaced by vlm_client.py)
 tests/
 ├── __init__.py
-├── test_endpoint.py    # SageMaker endpoint connectivity test
+├── test_endpoint.py    # HF ZeroGPU VLM endpoint connectivity test
 ├── test_improvements.py # OpenBMB optimization tests
 └── test_pipeline.py    # Full pipeline integration test
 requirements.txt    # Lightweight: requests, gradio, plotly, pandas, etc.
@@ -141,20 +141,20 @@ When VLM can't extract certain data, Python calculates:
 ## Key Gotchas
 
 - Model repo is `Qwen/Qwen2.5-VL-7B-Instruct`.
-- vLLM requires `--quantization bitsandbytes --load-format bitsandbytes` for INT4 models (configured in the SageMaker container).
-- SageMaker endpoint URL is set via `SAGEMAKER_ENDPOINT_URL` environment variable (AWS account required).
-- AWS credentials required (via `~/.aws/credentials` or IAM role).
+- vLLM requires `--quantization bitsandbytes --load-format bitsandbytes` for INT4 models (configured in the HF Spaces ZeroGPU container).
+- VLM endpoint URL is set via `VLM_ENDPOINT_URL` environment variable (HF Spaces ZeroGPU account required).
+- HF credentials required (via `TOKEN` env var).
 - Deepseek R1 emits chain-of-thought in `...` blocks; `strip_reasoning()` removes them before JSON parsing.
 - Deepseek R1 synthesis is a single call, not a tool-calling loop (latency budget).
-- ZeroGPU runs on HF Spaces, not AWS SageMaker; `ZEROGPU_ENDPOINT_URL` env var required.
+- ZeroGPU runs on HF Spaces; `ZEROGPU_ENDPOINT_URL` env var required.
 - Qwen2.5-VL-7B INT4 (~5GB VRAM) + Deepseek-R1-Distill-Qwen-7B INT4 (~5GB) fit on an L4 (24GB) / ZeroGPU T4 (16GB) with quantization.
 - Base64 encoding increases image payload ~33% — JPEG quality 95 preserves fine print.
-- SageMaker cold start variability: first request may be slow after idle periods.
+- HF Spaces ZeroGPU cold start variability: first request may be slow after idle periods.
 - vLLM serves an OpenAI-compatible API — no custom client code needed.
 - Plotly charts render in `gr.Plot()` components — not `gr.Image()`.
-- The SageMaker backend (`backend.py`) is deployed separately from the HF Space.
+- The VLM backend (`vlm_client.py`) is deployed as a separate HF Spaces ZeroGPU Space from the frontend.
 - Image preprocessing enhances contrast + sharpens for medicine labels.
-- Using `uv` instead of `pip` for faster SageMaker container builds.
+- Using `uv` instead of `pip` for faster Space builds.
 - OCR text truncated to 800 chars in Pass 2 prompts (up from 300) to capture more date/ingredient info.
 - OCR exceptions now propagate to error handler instead of failing silently.
 - Dynamic expiry defaults to 1-year shelf life when dates are missing.
@@ -162,29 +162,30 @@ When VLM can't extract certain data, Python calculates:
 - Pass 2 prompts use `ThreadPoolExecutor` for parallel execution.
 - User text (from "Additional Info" box) takes priority over OCR text in prompts.
 - Chemical chart shows Name → Quantity with bar width proportional to parsed values.
-- `.env` file contains `TOKEN` (HF token) and `SAGEMAKER_ENDPOINT_URL` (SageMaker endpoint).
-- SageMaker deployment requires AWS credentials and `aws cli` configured.
-- SageMaker deployment requires `$env:PYTHONIOENCODING="utf-8"` on Windows.
+- `.env` file contains `TOKEN` (HF token) and `VLM_ENDPOINT_URL` (VLM endpoint).
+- HF Spaces ZeroGPU deployment requires HF credentials and `huggingface_hub` configured.
 
 ## Running Locally
 
 ```bash
-# Frontend only (needs SAGEMAKER_ENDPOINT_URL set)
+# Frontend only (needs VLM_ENDPOINT_URL set)
 pip install -r requirements.txt
-SAGEMAKER_ENDPOINT_URL=https://your-sagemaker-endpoint-url python app.py
+VLM_ENDPOINT_URL=https://your-vlm-space.hf.space python app.py
 # Opens at http://localhost:7860
 ```
 
 ## Deploying
 
-### 1. Deploy SageMaker backend
+### 1. Deploy VLM backend Space (ZeroGPU)
+
+Create a separate HuggingFace Space with ZeroGPU hardware that serves `Qwen/Qwen2.5-VL-7B-Instruct` (INT4) behind an OpenAI-compatible endpoint. Save the resulting URL.
 
 ```bash
-pip install -r requirements.txt
-$env:PYTHONIOENCODING="utf-8"  # Windows only
-python deploy_sagemaker.py
-# Prints the endpoint URL — save it
+# In the VLM Space, expose an OpenAI-compatible chat endpoint
+# Requires HF Spaces ZeroGPU (T4) hardware
 ```
+
+The VLM service exposes an OpenAI-compatible endpoint; `src/vlm_client.py` calls it via `VLM_ENDPOINT_URL`.
 
 ### 2. Deploy Deepseek R1 orchestrator Space (ZeroGPU)
 
@@ -199,15 +200,15 @@ The orchestration service exposes an OpenAI-compatible endpoint; `src/llm_client
 
 ### 3. Deploy HF Space frontend
 
-1. Set `SAGEMAKER_ENDPOINT_URL` as a Space secret (Settings → Secrets)
+1. Set `VLM_ENDPOINT_URL` as a Space secret (Settings → Secrets)
 2. Set `ZEROGPU_ENDPOINT_URL` as a Space secret (Settings → Secrets)
 3. Push code to the HF Space
 4. README.md frontmatter already declares `sdk: gradio`, `app_file: app.py`
 
 ## Submission Checklist
 
-- [x] SageMaker backend deployed and endpoint URL saved
-- [x] HF Space deployed with SAGEMAKER_ENDPOINT_URL secret configured
+- [x] VLM backend deployed and endpoint URL saved
+- [x] HF Space deployed with VLM_ENDPOINT_URL secret configured
 - [ ] Demo video recorded (show: upload image → crop label → analyze → charts + verdict)
 - [ ] Social media post made
 - [ ] Agent trace published to HF Hub (Sharing is Caring badge)

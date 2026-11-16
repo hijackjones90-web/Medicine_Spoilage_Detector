@@ -1,4 +1,4 @@
-"""Test the full pipeline with a medicine image via SageMaker."""
+"""Test the full pipeline with a medicine image via HF ZeroGPU VLM."""
 import requests
 import json
 import base64
@@ -6,9 +6,10 @@ from PIL import Image
 import io
 import os
 
-url = os.environ.get("SAGEMAKER_ENDPOINT_URL", "")
+url = os.environ.get("VLM_ENDPOINT_URL", "")
 if not url:
-    print("ERROR: SAGEMAKER_ENDPOINT_URL is not set. Deploy to SageMaker first.")
+    print("ERROR: VLM_ENDPOINT_URL is not set. "
+          "Deploy the Qwen2.5-VL Space on HF ZeroGPU first.")
     import sys
     sys.exit(1)
 
@@ -21,11 +22,17 @@ b64 = base64.b64encode(buf.getvalue()).decode()
 def test_prompt(prompt, label):
     print(f"=== {label} ===")
     try:
-        resp = requests.post(url, json={"images": [b64], "prompt": prompt}, timeout=300)
+        resp = requests.post(
+            f"{url.rstrip('/')}/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+            },
+            timeout=300,
+        )
         print(f"Status: {resp.status_code}")
         if resp.status_code == 200:
             data = resp.json()
-            response = data.get("response", "")
+            response = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             print(f"Response length: {len(response)} chars")
             print(f"Response preview: {response[:300]}")
         else:

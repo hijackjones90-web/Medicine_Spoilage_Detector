@@ -1,0 +1,418 @@
+"""HF Spaces ZeroGPU VLM client for Qwen2.5-VL-7B.
+
+Calls an OpenAI-compatible `/v1/chat/completions` endpoint served on an
+HF Spaces ZeroGPU Space (vLLM backend).
+
+Architecture:
+  - VLM (Qwen2.5-VL-7B INT4) → HF Spaces ZeroGPU Space (vLLM, OpenAI API)
+  - Orchestrator (Deepseek R1) → HF Spaces ZeroGPU (unchanged)
+
+This module provides a clean interface for running VLM prompts against the
+ZeroGPU endpoint, preserving the method names/signatures used by the
+orchestrator so call sites do not change.
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+
+import requests
+from PIL import Image
+
+from src.prompts import PROMPT_OCR, PASS2_PROMPTS, format_ocr_for_prompt
+from src.utils import (
+    parse_date,
+    calculate_theoretical_growth,
+    calculate_dynamic_expiry,
+    estimate_color_from_spoilage,
+)
+
+VLM_ENDPOINT_URL = os.environ.get("VLM_ENDPOINT_URL", "")
+
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2.0
+REQUEST_TIMEOUT = 300
+
+
+@dataclass
+class AnalysisResult:
+    """Structured result from VLM analysis (HF Spaces ZeroGPU backend)."""
+
+    ocr_data: dict = field(default_factory=dict)
+    medicine_info: dict = field(default_factory=dict)
+    spoilage_assessment: dict = field(default_factory=dict)
+    bacteria_estimate: dict = field(default_factory=dict)
+    chemicals: list = field(default_factory=list)
+    raw_responses: dict = field(default_factory=dict)
+    errors: list = field(default_factory=list)
+    bacteria_growth_curve: dict = field(default_factory=dict)
+    color_analysis: dict = field(default_factory=dict)
+    dynamic_expiry: dict = field(default_factory=dict)
+
+
+def _image_to_base64(image) -> str:
+    """Convert image to base64-encoded JPEG string."""
+    if isinstance(image, tuple):
+        image = image[0]
+    if not isinstance(image, Image.Image):
+        try:
+            import numpy as np
+            image = Image.fromarray(np.array(image))
+        except Exception as e:
+            raise ValueError(f"Cannot convert image to PIL: {e}")
+
+    if image.mode == "RGBA":
+        image = image.convert("RGB")
+    elif image.mode != "RGB":
+        image = image.convert("RGB")
+
+    max_size = 1344
+    if image.width > max_size or image.height > max_size:
+        ratio = min(max_size / image.width, max_size / image.height)
+        new_size = (int(image.width * ratio), int(image.height * ratio))
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=95)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _extract_json(text: str) -> dict | list | None:
+    """Extract JSON from VLM response with multiple fallback strategies."""
+    if not text:
+        return None
+
+    cleaned = text.strip()
+
+    for pattern in [r"```json\s*\n?(.*?)\n?\s*```", r"```\s*\n?(.*?)\n?\s*```"]:
+        import re
+        fence_match = re.search(pattern, cleaned, re.DOTALL)
+        if fence_match:
+            cleaned = fence_match.group(1).strip()
+            break
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    import re
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
+        start = cleaned.find(start_char)
+        end = cleaned.rfind(end_char)
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(cleaned[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+    return None
+
+
+def _preprocess_images_for_medicine(images: list) -> list:
+    """Preprocess images for medicine label analysis."""
+    processed = []
+    for img in images:
+        if isinstance(img, tuple):
+            img = img[0]
+        if not isinstance(img, Image.Image):
+            try:
+                import numpy as np
+                img = Image.fromarray(np.array(img))
+            except Exception:
+                processed.append(img)
+                continue
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        max_size = 1344
+        if img.width > max_size or img.height > max_size:
+            ratio = min(max_size / img.width, max_size / img.height)
+            new_size = (int(img.width * ratio), int(img.height * ratio))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        from PIL import ImageEnhance, ImageFilter
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.2)
+        img = img.filter(ImageFilter.SHARPEN)
+        processed.append(img)
+    return processed
+
+
+def _build_messages(prompt: str, images: list) -> list:
+    """Build OpenAI-style messages payload with text + image content."""
+    content = [{"type": "text", "text": prompt}]
+    for img in images[:4]:
+        b64 = _image_to_base64(img)
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            }
+        )
+    return [{"role": "user", "content": content}]
+
+
+def _run_prompt(images: list, prompt: str, user_text: str = "") -> str:
+    """Run a single prompt on images via the HF ZeroGPU VLM endpoint."""
+    if not VLM_ENDPOINT_URL:
+        raise RuntimeError(
+            "VLM_ENDPOINT_URL not set. Deploy the Qwen2.5-VL Space on HF ZeroGPU first."
+        )
+
+    url = VLM_ENDPOINT_URL.rstrip("/") + "/v1/chat/completions"
+    messages = _build_messages(prompt, images)
+    payload = {
+        "messages": messages,
+        "temperature": 0.2,
+        "max_tokens": 2048,
+    }
+
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF_BASE ** attempt)
+
+    raise RuntimeError(
+        f"VLM request failed after {MAX_RETRIES} attempts: {last_error}"
+    )
+
+
+def _simplify_prompt(prompt: str, retry_num: int) -> str:
+    """Progressively simplify prompt on each retry."""
+    if retry_num == 0:
+        return prompt
+    elif retry_num == 1:
+        lines = [
+            l for l in prompt.split("\n")
+            if not l.strip().startswith("Note:") and "example" not in l.lower()
+        ]
+        return "\n".join(lines)
+    elif retry_num == 2:
+        json_start = prompt.find("{")
+        json_end = prompt.rfind("}") + 1
+        if json_start != -1 and json_end > json_start:
+            return f"Return ONLY valid JSON matching this schema:\n{prompt[json_start:json_end]}"
+        return prompt
+    elif retry_num == 3:
+        first_line = prompt.split("\n")[0]
+        json_start = prompt.find("{")
+        json_end = prompt.rfind("}") + 1
+        if json_start != -1:
+            return f"{first_line}\nReturn JSON: {prompt[json_start:json_end]}"
+        return first_line
+    return "Return valid JSON only. No explanation."
+
+
+def _run_prompt_with_retry(images: list, prompt: str, user_text: str = "") -> str:
+    """Run prompt with up to 3 retries, simplifying on each failure."""
+    last_error = None
+    for attempt in range(3):
+        try:
+            current_prompt = _simplify_prompt(prompt, attempt)
+            raw = _run_prompt(images, current_prompt, user_text=user_text)
+            parsed = _extract_json(raw)
+            if parsed is not None:
+                return raw
+            last_error = f"JSON parse failed on attempt {attempt + 1}"
+        except Exception as e:
+            last_error = str(e)
+    raise RuntimeError(f"Failed after 3 retries. Last error: {last_error}")
+
+
+def _pass1_ocr(images: list, user_text: str = "") -> dict:
+    """Pass 1: Extract visible text from all images."""
+    raw = _run_prompt_with_retry(images, PROMPT_OCR, user_text=user_text)
+    parsed = _extract_json(raw)
+    if isinstance(parsed, dict):
+        return parsed
+    return {"text_blocks": [], "packaging_type": "unknown", "surfaces_visible": []}
+
+
+def _pass2_structured(
+    images: list, ocr_data: dict, user_text: str = ""
+) -> dict[str, dict | list]:
+    """Pass 2: Run 4 VLM prompts IN PARALLEL with OCR context."""
+    ocr_text = format_ocr_for_prompt(ocr_data, max_chars=800)
+
+    user_context = ""
+    if user_text and user_text.strip():
+        user_context = f"User-provided info:\n{user_text.strip()}\n\n"
+
+    prompts_to_run = {}
+    for prompt_name, prompt_template in PASS2_PROMPTS.items():
+        if "{OCR_TEXT}" in prompt_template:
+            combined = user_context + "OCR text:\n" + ocr_text if user_context else ocr_text
+            prompts_to_run[prompt_name] = prompt_template.format(OCR_TEXT=combined)
+        else:
+            prompts_to_run[prompt_name] = prompt_template
+
+    results: dict[str, dict | list] = {}
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(_run_prompt_with_retry, images, prompt, user_text): name
+            for name, prompt in prompts_to_run.items()
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                raw = future.result()
+                parsed = _extract_json(raw)
+                if parsed is not None:
+                    results[name] = parsed
+                else:
+                    results[name] = {"_error": "JSON parse failed after retries"}
+            except Exception as e:
+                results[name] = {"_error": str(e)}
+    return results
+
+
+def _calculate_days_since_mfg(medicine_info: dict) -> int:
+    mfg_date_str = medicine_info.get("mfg_date")
+    if mfg_date_str:
+        from src.utils import parse_date
+        mfg_date = parse_date(mfg_date_str)
+        if mfg_date:
+            return (datetime.now() - mfg_date).days
+    return 60
+
+
+def _calculate_shelf_life(medicine_info: dict) -> int:
+    mfg_date_str = medicine_info.get("mfg_date")
+    exp_date_str = medicine_info.get("exp_date")
+    if mfg_date_str and exp_date_str:
+        from src.utils import parse_date
+        mfg_date = parse_date(mfg_date_str)
+        exp_date = parse_date(exp_date_str)
+        if mfg_date and exp_date:
+            return max(30, (exp_date - mfg_date).days)
+    return 365
+
+
+def analyze_image(images: list, user_text: str = "") -> AnalysisResult:
+    """Run VLM analysis via HF ZeroGPU endpoint with Python fallbacks."""
+    result = AnalysisResult()
+    if not images:
+        result.errors.append("No images provided")
+        return result
+
+    try:
+        processed_images = _preprocess_images_for_medicine(images)
+    except Exception as e:
+        result.errors.append(f"Image preprocessing failed: {str(e)}")
+        processed_images = images
+
+    # Pass 1: OCR
+    try:
+        ocr_data = _pass1_ocr(processed_images, user_text=user_text)
+        result.ocr_data = ocr_data
+        result.raw_responses["ocr"] = json.dumps(ocr_data, indent=2)
+    except Exception as e:
+        result.errors.append(f"OCR failed: {str(e)}")
+        ocr_data = {"text_blocks": [], "packaging_type": "unknown", "surfaces_visible": []}
+
+    if user_text and user_text.strip():
+        result.raw_responses["user_text"] = user_text.strip()
+
+    # Pass 2: Structured
+    try:
+        structured = _pass2_structured(processed_images, ocr_data, user_text=user_text)
+
+        if "info" in structured and "_error" not in structured["info"]:
+            result.medicine_info = structured["info"]
+            result.raw_responses["vlm_info"] = json.dumps(structured["info"], indent=2)
+        else:
+            result.errors.append(f"info: {structured.get('info', {}).get('_error', 'failed')}")
+
+        if "spoilage" in structured and "_error" not in structured["spoilage"]:
+            result.spoilage_assessment = structured["spoilage"]
+            result.raw_responses["vlm_spoilage"] = json.dumps(structured["spoilage"], indent=2)
+        else:
+            result.errors.append(f"spoilage: {structured.get('spoilage', {}).get('_error', 'failed')}")
+
+        if "bacteria" in structured and "_error" not in structured["bacteria"]:
+            result.bacteria_estimate = structured["bacteria"]
+            result.raw_responses["vlm_bacteria"] = json.dumps(structured["bacteria"], indent=2)
+        else:
+            result.errors.append(f"bacteria: {structured.get('bacteria', {}).get('_error', 'failed')}")
+
+        if "chemicals" in structured and "_error" not in structured["chemicals"]:
+            chem_data = structured["chemicals"]
+            if isinstance(chem_data, dict) and "chemicals" in chem_data:
+                result.chemicals = chem_data["chemicals"]
+            elif isinstance(chem_data, list):
+                result.chemicals = chem_data
+            result.raw_responses["vlm_chemicals"] = json.dumps(chem_data, indent=2)
+        else:
+            result.errors.append(f"chemicals: {structured.get('chemicals', {}).get('_error', 'failed')}")
+    except Exception as e:
+        result.errors.append(f"VLM Pass 2 failed: {str(e)}")
+
+    # Python fallback calculations
+    try:
+        ingredients = result.medicine_info.get("ingredients", [])
+        preservatives = result.bacteria_estimate.get("preservatives_found", [])
+        spoilage_level = result.spoilage_assessment.get("spoilage_level", 0)
+        vlm_bacteria_level = result.bacteria_estimate.get("growth_level", 0)
+        days_since_mfg = _calculate_days_since_mfg(result.medicine_info)
+        shelf_life = _calculate_shelf_life(result.medicine_info)
+
+        result.bacteria_growth_curve = calculate_theoretical_growth(
+            ingredients=ingredients,
+            preservatives=preservatives,
+            shelf_life_days=shelf_life,
+            days_since_mfg=days_since_mfg,
+            spoilage_level=spoilage_level,
+            vlm_bacteria_level=vlm_bacteria_level,
+        )
+        result.raw_responses["python_bacteria_growth"] = json.dumps(
+            result.bacteria_growth_curve, indent=2
+        )
+    except Exception as e:
+        result.errors.append(f"Bacteria growth calc: {str(e)}")
+
+    try:
+        result.color_analysis = estimate_color_from_spoilage(result.spoilage_assessment)
+        result.raw_responses["python_color_analysis"] = json.dumps(
+            result.color_analysis, indent=2
+        )
+    except Exception as e:
+        result.errors.append(f"Color analysis calc: {str(e)}")
+
+    try:
+        mfg_date = parse_date(result.medicine_info.get("mfg_date"))
+        exp_date = parse_date(result.medicine_info.get("exp_date"))
+        preservatives = result.bacteria_estimate.get("preservatives_found", [])
+        color_deviation = result.color_analysis.get("color_deviation", 0.0)
+
+        result.dynamic_expiry = calculate_dynamic_expiry(
+            mfg_date=mfg_date,
+            exp_date=exp_date,
+            spoilage_assessment=result.spoilage_assessment,
+            color_deviation=color_deviation,
+            preservatives=preservatives,
+        )
+        result.raw_responses["python_dynamic_expiry"] = json.dumps(
+            result.dynamic_expiry, indent=2
+        )
+    except Exception as e:
+        result.errors.append(f"Dynamic expiry calc: {str(e)}")
+
+    return result
+
+
+def _run_prompt_sequential(images: list, prompt: str, user_text: str = "") -> str:
+    """Run a prompt sequentially (used for simple cases)."""
+    return _run_prompt(images, prompt, user_text=user_text)

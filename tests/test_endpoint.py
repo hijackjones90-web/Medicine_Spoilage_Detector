@@ -1,4 +1,4 @@
-"""Quick test of the SageMaker endpoint."""
+"""Quick test of the HF ZeroGPU VLM endpoint."""
 import requests
 import json
 import base64
@@ -7,9 +7,10 @@ import os
 from PIL import Image
 import io
 
-url = os.environ.get("SAGEMAKER_ENDPOINT_URL", "")
+url = os.environ.get("VLM_ENDPOINT_URL", "")
 if not url:
-    print("ERROR: SAGEMAKER_ENDPOINT_URL is not set. Deploy to SageMaker first.")
+    print("ERROR: VLM_ENDPOINT_URL is not set. "
+          "Deploy the Qwen2.5-VL Space on HF ZeroGPU first.")
     sys.exit(1)
 
 # Create a small test image
@@ -18,20 +19,22 @@ buf = io.BytesIO()
 img.save(buf, format="JPEG", quality=95)
 b64 = base64.b64encode(buf.getvalue()).decode()
 
-# SageMaker endpoint: JSON body with images and prompt
+# HF ZeroGPU endpoint (OpenAI compatible): JSON body with messages and image content
 prompt = 'Return ONLY valid JSON: {"status": "ok", "model": "working"}'
 
 print(f"Sending test request to: {url}")
 try:
     resp = requests.post(
-        url,
-        json={"images": [b64], "prompt": prompt},
+        f"{url.rstrip('/')}/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        },
         timeout=300,
     )
     print(f"Status: {resp.status_code}")
     if resp.status_code == 200:
         data = resp.json()
-        print(f"Response: {data.get('response', 'NO RESPONSE KEY')[:500]}")
+        print(f"Response: {data.get('choices', [{}])[0].get('message', {}).get('content', 'NO RESPONSE KEY')[:500]}")
     else:
         print(f"Error body: {resp.text[:500]}")
 except Exception as e:
