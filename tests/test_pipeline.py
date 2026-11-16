@@ -1,4 +1,4 @@
-"""Test the full pipeline with a medicine image."""
+"""Test the full pipeline with a medicine image via SageMaker."""
 import requests
 import json
 import base64
@@ -6,9 +6,9 @@ from PIL import Image
 import io
 import os
 
-os.environ["MODAL_ENDPOINT_URL"] = os.environ.get("MODAL_ENDPOINT_URL", "")
-if not os.environ["MODAL_ENDPOINT_URL"]:
-    print("ERROR: MODAL_ENDPOINT_URL is not set. Deploy backend.py and export the URL.")
+url = os.environ.get("SAGEMAKER_ENDPOINT_URL", "")
+if not url:
+    print("ERROR: SAGEMAKER_ENDPOINT_URL is not set. Deploy to SageMaker first.")
     import sys
     sys.exit(1)
 
@@ -18,9 +18,21 @@ buf = io.BytesIO()
 img.save(buf, format="JPEG", quality=95)
 b64 = base64.b64encode(buf.getvalue()).decode()
 
-url = os.environ["MODAL_ENDPOINT_URL"]
+def test_prompt(prompt, label):
+    print(f"=== {label} ===")
+    try:
+        resp = requests.post(url, json={"images": [b64], "prompt": prompt}, timeout=300)
+        print(f"Status: {resp.status_code}")
+        if resp.status_code == 200:
+            data = resp.json()
+            response = data.get("response", "")
+            print(f"Response length: {len(response)} chars")
+            print(f"Response preview: {response[:300]}")
+        else:
+            print(f"Error: {resp.text[:200]}")
+    except Exception as e:
+        print(f"Error: {e}")
 
-# Test 1: OCR prompt (short)
 ocr_prompt = """Read ALL visible text from this medicine packaging. Check front, sides, back, stickers, caps, and foil.
 
 For each text block, return:
@@ -36,21 +48,6 @@ Return ONLY valid JSON:
 {"text_blocks": [{"text": "exact text", "location": "sticker", "source_image": 1}], "packaging_type": "bottle", "surfaces_visible": ["front", "sticker"]}
 """
 
-print("=== Test 1: OCR Prompt ===")
-try:
-    resp = requests.post(url, params={"prompt": ocr_prompt}, json=[b64], timeout=120)
-    print(f"Status: {resp.status_code}")
-    if resp.status_code == 200:
-        data = resp.json()
-        response = data.get("response", "")
-        print(f"Response length: {len(response)} chars")
-        print(f"Response preview: {response[:300]}")
-    else:
-        print(f"Error: {resp.text[:200]}")
-except Exception as e:
-    print(f"Error: {e}")
-
-# Test 2: Info prompt (short)
 info_prompt = """Using the OCR text below, extract medicine information.
 
 Return ONLY valid JSON:
@@ -58,30 +55,11 @@ Return ONLY valid JSON:
 
 If a field is not found, use null. Do not guess.
 
-IMPORTANT: If no expiry or manufacturing date is visible anywhere (label removed,
-sticker missing, date rubbed off), set both mfg_date and exp_date to null.
-Do NOT guess dates. The app will use visual analysis as fallback.
-
 OCR text:
 [photo 1, sticker] B.No: NJL25004 MFG: SEP 2025 EXP: FEB 2027
 [photo 1, front] Jectocos Lipo - Iron, Folic Acid and Vitamin B12
 """
 
-print("\n=== Test 2: Info Prompt ===")
-try:
-    resp = requests.post(url, params={"prompt": info_prompt}, json=[b64], timeout=120)
-    print(f"Status: {resp.status_code}")
-    if resp.status_code == 200:
-        data = resp.json()
-        response = data.get("response", "")
-        print(f"Response length: {len(response)} chars")
-        print(f"Response preview: {response[:300]}")
-    else:
-        print(f"Error: {resp.text[:200]}")
-except Exception as e:
-    print(f"Error: {e}")
-
-# Test 3: Spoilage prompt (short)
 spoilage_prompt = """Look at this medicine image. Assess visual spoilage.
 
 Return ONLY valid JSON:
@@ -90,16 +68,6 @@ Return ONLY valid JSON:
 Note: Suspensions (like iron syrup) are NATURALLY opaque. Do not flag that as cloudiness.
 """
 
-print("\n=== Test 3: Spoilage Prompt ===")
-try:
-    resp = requests.post(url, params={"prompt": spoilage_prompt}, json=[b64], timeout=120)
-    print(f"Status: {resp.status_code}")
-    if resp.status_code == 200:
-        data = resp.json()
-        response = data.get("response", "")
-        print(f"Response length: {len(response)} chars")
-        print(f"Response preview: {response[:300]}")
-    else:
-        print(f"Error: {resp.text[:200]}")
-except Exception as e:
-    print(f"Error: {e}")
+test_prompt(ocr_prompt, "Test 1: OCR Prompt")
+test_prompt(info_prompt, "Test 2: Info Prompt")
+test_prompt(spoilage_prompt, "Test 3: Spoilage Prompt")

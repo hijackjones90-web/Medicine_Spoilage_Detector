@@ -8,10 +8,10 @@ Submission deadline: **June 15, 2026**.
 
 ## Tech Stack
 
-- **VLM Model:** `Qwen/Qwen2.5-VL-7B-Instruct` (7B params, runtime bitsandbytes INT4 quantized, served via vLLM on Modal)
+- **VLM Model:** `Qwen/Qwen2.5-VL-7B-Instruct` (7B params, runtime bitsandbytes INT4 quantized, served via AWS SageMaker)
 - **Orchestrator Model:** `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` (7B params, INT4, running on HF Spaces ZeroGPU)
 - **Frontend:** Gradio 6.17.3 on HuggingFace Spaces
-- **VLM Backend:** Modal serverless GPU (L4) with vLLM inference
+- **VLM Backend:** AWS SageMaker GPU instance with vLLM inference
 - **Orchestrator Backend:** HuggingFace Spaces ZeroGPU (T4) with transformers inference
 - **Python:** 3.13
 - **Charts:** Plotly (interactive, renders in `gr.Plot`)
@@ -20,7 +20,7 @@ Submission deadline: **June 15, 2026**.
 ## Architecture
 
 ```
-HF Spaces (Gradio)                         Modal (GPU)                 HF Spaces ZeroGPU (T4)
+HF Spaces (Gradio)                         AWS SageMaker                HF Spaces ZeroGPU (T4)
 ┌──────────────────────┐         HTTPS POST ┌──────────────────┐  HTTPS POST ┌──────────────────────┐
 │  app.py              │         JSON resp  │  backend.py      │  JSON resp  │  DeepSeek-R1-        │
 │  orchestrator.py  ───┼──────────┬───────►│  vLLM + Qwen2.5- │────────────►│  Distill-Qwen-7B     │
@@ -33,8 +33,8 @@ HF Spaces (Gradio)                         Modal (GPU)                 HF Spaces
 ```
 
 - **Frontend** (HF Spaces): Gradio UI, chart generation, spoilage scoring — no GPU needed
-- **Backend** (Modal): VLM inference only — spins up on request, scales to 0 when idle
-- **Communication:** Base64-encoded JPEG images sent via HTTPS to Modal endpoint (single image, cropped to label via ImageEditor)
+- **Backend** (AWS SageMaker): VLM inference only — spins up on request, scales to 0 when idle
+- **Communication:** Base64-encoded JPEG images sent via HTTPS to SageMaker endpoint (single image, cropped to label via ImageEditor)
 
 ## Hackathon Constraints
 
@@ -55,20 +55,22 @@ HF Spaces (Gradio)                         Modal (GPU)                 HF Spaces
 
 ```
 app.py              # Gradio Blocks UI — main entry point (HF Spaces)
-backend.py          # Modal deployment: vLLM + Qwen2.5-VL-7B INT4 on L4 GPU
+backend.py          # SageMaker deployment: vLLM + Qwen2.5-VL-7B INT4 on SageMaker GPU
 src/
 ├── __init__.py
 ├── orchestrator.py # Orchestrator class + analyze_image() drop-in replacement
 ├── llm_client.py   # Deepseek-R1 client with reasoning strip
                      (remote via ZeroGPU endpoint or local transformers)
-├── engine.py       # HTTPS client that calls Modal endpoint (two-pass pipeline)
+├── sagemaker_client.py  # SageMaker HTTPS client for VLM inference (wrapper for API calls)
+├── engine.py       # HTTPS client that calls SageMaker endpoint (two-pass pipeline)
                      (low-level VLM client, now called by the orchestrator)
 ├── prompts.py      # VLM prompt templates with OCR context injection
 ├── utils.py        # Date parsing, chemical reference DB, spoilage scoring
 └── visualization.py # Plotly charts: chemical bar, timeline, gauge, radar
++── deploy_sagemaker.py  # SageMaker deployment script (handles container setup, dependencies, and model serving)
 tests/
 ├── __init__.py
-├── test_endpoint.py    # Modal endpoint connectivity test
+├── test_endpoint.py    # SageMaker endpoint connectivity test
 ├── test_improvements.py # OpenBMB optimization tests
 └── test_pipeline.py    # Full pipeline integration test
 requirements.txt    # Lightweight: requests, gradio, plotly, pandas, etc.
@@ -139,19 +141,20 @@ When VLM can't extract certain data, Python calculates:
 ## Key Gotchas
 
 - Model repo is `Qwen/Qwen2.5-VL-7B-Instruct`.
-- vLLM requires `--quantization bitsandbytes --load-format bitsandbytes` for INT4 models.
-- Modal endpoint URL is set via `MODAL_ENDPOINT_URL` environment variable (HF Spaces secret).
+- vLLM requires `--quantization bitsandbytes --load-format bitsandbytes` for INT4 models (configured in the SageMaker container).
+- SageMaker endpoint URL is set via `SAGEMAKER_ENDPOINT_URL` environment variable (AWS account required).
+- AWS credentials required (via `~/.aws/credentials` or IAM role).
 - Deepseek R1 emits chain-of-thought in `...` blocks; `strip_reasoning()` removes them before JSON parsing.
 - Deepseek R1 synthesis is a single call, not a tool-calling loop (latency budget).
-- ZeroGPU runs on HF Spaces, not Modal; `ZEROGPU_ENDPOINT_URL` env var required.
+- ZeroGPU runs on HF Spaces, not AWS SageMaker; `ZEROGPU_ENDPOINT_URL` env var required.
 - Qwen2.5-VL-7B INT4 (~5GB VRAM) + Deepseek-R1-Distill-Qwen-7B INT4 (~5GB) fit on an L4 (24GB) / ZeroGPU T4 (16GB) with quantization.
 - Base64 encoding increases image payload ~33% — JPEG quality 95 preserves fine print.
-- Modal cold start takes ~30-60 sec after idle. First request may be slow.
+- SageMaker cold start variability: first request may be slow after idle periods.
 - vLLM serves an OpenAI-compatible API — no custom client code needed.
 - Plotly charts render in `gr.Plot()` components — not `gr.Image()`.
-- The Modal backend (`backend.py`) is deployed separately from the HF Space.
+- The SageMaker backend (`backend.py`) is deployed separately from the HF Space.
 - Image preprocessing enhances contrast + sharpens for medicine labels.
-- Using `uv` instead of `pip` for faster Modal image builds.
+- Using `uv` instead of `pip` for faster SageMaker container builds.
 - OCR text truncated to 800 chars in Pass 2 prompts (up from 300) to capture more date/ingredient info.
 - OCR exceptions now propagate to error handler instead of failing silently.
 - Dynamic expiry defaults to 1-year shelf life when dates are missing.
@@ -159,27 +162,27 @@ When VLM can't extract certain data, Python calculates:
 - Pass 2 prompts use `ThreadPoolExecutor` for parallel execution.
 - User text (from "Additional Info" box) takes priority over OCR text in prompts.
 - Chemical chart shows Name → Quantity with bar width proportional to parsed values.
-- `.env` file contains `TOKEN` (HF token) and `MODAL_ENDPOINT_URL` (Modal endpoint).
-- Modal secret created: `modal secret create huggingface TOKEN=hf_xxx`.
-- Modal deployment requires `$env:PYTHONIOENCODING="utf-8"` on Windows.
+- `.env` file contains `TOKEN` (HF token) and `SAGEMAKER_ENDPOINT_URL` (SageMaker endpoint).
+- SageMaker deployment requires AWS credentials and `aws cli` configured.
+- SageMaker deployment requires `$env:PYTHONIOENCODING="utf-8"` on Windows.
 
 ## Running Locally
 
 ```bash
-# Frontend only (needs MODAL_ENDPOINT_URL set)
+# Frontend only (needs SAGEMAKER_ENDPOINT_URL set)
 pip install -r requirements.txt
-MODAL_ENDPOINT_URL=https://your-workspace--biochem-spoilage-detect-analyze.modal.run python app.py
+SAGEMAKER_ENDPOINT_URL=https://your-sagemaker-endpoint-url python app.py
 # Opens at http://localhost:7860
 ```
 
 ## Deploying
 
-### 1. Deploy Modal backend
+### 1. Deploy SageMaker backend
 
 ```bash
-pip install modal
+pip install -r requirements.txt
 $env:PYTHONIOENCODING="utf-8"  # Windows only
-modal deploy backend.py
+python deploy_sagemaker.py
 # Prints the endpoint URL — save it
 ```
 
@@ -196,15 +199,15 @@ The orchestration service exposes an OpenAI-compatible endpoint; `src/llm_client
 
 ### 3. Deploy HF Space frontend
 
-1. Set `MODAL_ENDPOINT_URL` as a Space secret (Settings → Secrets)
+1. Set `SAGEMAKER_ENDPOINT_URL` as a Space secret (Settings → Secrets)
 2. Set `ZEROGPU_ENDPOINT_URL` as a Space secret (Settings → Secrets)
 3. Push code to the HF Space
 4. README.md frontmatter already declares `sdk: gradio`, `app_file: app.py`
 
 ## Submission Checklist
 
-- [x] Modal backend deployed and endpoint URL saved
-- [x] HF Space deployed with MODAL_ENDPOINT_URL secret configured
+- [x] SageMaker backend deployed and endpoint URL saved
+- [x] HF Space deployed with SAGEMAKER_ENDPOINT_URL secret configured
 - [ ] Demo video recorded (show: upload image → crop label → analyze → charts + verdict)
 - [ ] Social media post made
 - [ ] Agent trace published to HF Hub (Sharing is Caring badge)

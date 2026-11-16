@@ -1,7 +1,7 @@
 """Drug Spoilage Detector — Main Gradio App.
 
 Detects medicine spoilage from images using a two-stage agentic pipeline:
-  - Qwen2.5-VL-7B (Modal GPU) — OCR + structured visual extraction
+  - Qwen2.5-VL-7B (AWS SageMaker GPU) — OCR + structured visual extraction
   - Deepseek-R1-Distill-Qwen-7B (HF Spaces ZeroGPU) — synthesis & verdict
 Upload photos of a medicine to detect spoilage, visualize chemical
 composition, estimate bacteria growth, and compare expiry dates.
@@ -385,7 +385,7 @@ with gr.Blocks(title="Drug Spoilage Detector") as demo:
     gr.HTML("""
     <div class="header-banner">
         <h1>Drug Spoilage Detector</h1>
-        <p>Powered by Qwen2.5-VL-7B (Modal) + Deepseek R1 (ZeroGPU)</p>
+        <p>Powered by Qwen2.5-VL-7B (SageMaker GPU) + Deepseek R1 (ZeroGPU)</p>
     </div>
     """)
 
@@ -468,7 +468,7 @@ with gr.Blocks(title="Drug Spoilage Detector") as demo:
         """
         ---
         Built for [Build Small Hackathon](https://huggingface.co/build-small-hackathon) — Track 1: Backyard AI.
-        Models: `Qwen2.5-VL-7B` (Modal) + `DeepSeek-R1-Distill-Qwen-7B` (HF Spaces ZeroGPU). Inference runs on cloud GPUs.
+        Models: `Qwen2.5-VL-7B` (AWS SageMaker) + `DeepSeek-R1-Distill-Qwen-7B` (HF Spaces ZeroGPU). Inference runs on cloud GPUs.
         """
     )
 

@@ -26,12 +26,11 @@ from datetime import datetime, timedelta
 import requests
 from PIL import Image
 
-from src.engine import (
+from src.sagemaker_client import (
     _image_to_base64,
     _preprocess_images_for_medicine,
     _extract_json,
     _run_prompt as _vlm_run_prompt,
-    MODAL_ENDPOINT_URL as VLM_ENDPOINT_URL,
 )
 from src.prompts import PROMPT_OCR, PASS2_PROMPTS, format_ocr_for_prompt
 from src.utils import (

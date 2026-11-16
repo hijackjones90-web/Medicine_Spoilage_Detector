@@ -1,4 +1,4 @@
-"""Quick test of the Modal endpoint."""
+"""Quick test of the SageMaker endpoint."""
 import requests
 import json
 import base64
@@ -7,9 +7,9 @@ import os
 from PIL import Image
 import io
 
-url = os.environ.get("MODAL_ENDPOINT_URL", "")
+url = os.environ.get("SAGEMAKER_ENDPOINT_URL", "")
 if not url:
-    print("ERROR: MODAL_ENDPOINT_URL is not set. Deploy backend.py and export the URL.")
+    print("ERROR: SAGEMAKER_ENDPOINT_URL is not set. Deploy to SageMaker first.")
     sys.exit(1)
 
 # Create a small test image
@@ -18,16 +18,15 @@ buf = io.BytesIO()
 img.save(buf, format="JPEG", quality=95)
 b64 = base64.b64encode(buf.getvalue()).decode()
 
-# Modal endpoint: prompt in query params, images list as raw JSON body
+# SageMaker endpoint: JSON body with images and prompt
 prompt = 'Return ONLY valid JSON: {"status": "ok", "model": "working"}'
 
 print(f"Sending test request to: {url}")
 try:
     resp = requests.post(
         url,
-        params={"prompt": prompt},
-        json=[b64],
-        timeout=120,
+        json={"images": [b64], "prompt": prompt},
+        timeout=300,
     )
     print(f"Status: {resp.status_code}")
     if resp.status_code == 200:
