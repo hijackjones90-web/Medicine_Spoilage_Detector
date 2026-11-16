@@ -1,7 +1,10 @@
 """Modal inference backend for Drug Spoilage Detector.
 
-Deploys MiniCPM-V 2.6 INT4 (8B params, bitsandbytes quantized) via vLLM
-with an HTTPS endpoint. The Gradio frontend calls this endpoint for VLM analysis.
+Deploys Qwen2.5-VL-7B (INT4, bitsandbytes quantized) via vLLM with an HTTPS
+endpoint. The Gradio frontend calls this endpoint for VLM analysis (OCR + 4
+parallel structured prompts).
+
+The Deepseek R1 orchestrator runs on HF Spaces ZeroGPU (separate deployment).
 
 Usage:
     modal deploy backend.py
@@ -12,7 +15,7 @@ named MODAL_ENDPOINT_URL.
 
 import modal
 
-MODEL_NAME = "openbmb/MiniCPM-V-2_6-int4"
+MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 VLLM_PORT = 8000
 
 app = modal.App("biochem-spoilage-detect")

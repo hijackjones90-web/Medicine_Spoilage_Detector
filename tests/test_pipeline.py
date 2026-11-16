@@ -6,7 +6,11 @@ from PIL import Image
 import io
 import os
 
-os.environ["MODAL_ENDPOINT_URL"] = "https://vishalsv2205--biochem-spoilage-detect-vlminference-analyze.modal.run"
+os.environ["MODAL_ENDPOINT_URL"] = os.environ.get("MODAL_ENDPOINT_URL", "")
+if not os.environ["MODAL_ENDPOINT_URL"]:
+    print("ERROR: MODAL_ENDPOINT_URL is not set. Deploy backend.py and export the URL.")
+    import sys
+    sys.exit(1)
 
 # Create a test image (orange liquid like Jectocos Lipo)
 img = Image.new("RGB", (200, 200), color=(255, 140, 50))
@@ -53,6 +57,10 @@ Return ONLY valid JSON:
 {"name": "product name", "manufacturer": "company", "mfg_date": "date string or null", "exp_date": "date string or null", "batch_no": "batch number or null", "dosage_form": "syrup|tablet|capsule|other", "ingredients": ["list"], "storage_conditions": "text or null"}
 
 If a field is not found, use null. Do not guess.
+
+IMPORTANT: If no expiry or manufacturing date is visible anywhere (label removed,
+sticker missing, date rubbed off), set both mfg_date and exp_date to null.
+Do NOT guess dates. The app will use visual analysis as fallback.
 
 OCR text:
 [photo 1, sticker] B.No: NJL25004 MFG: SEP 2025 EXP: FEB 2027

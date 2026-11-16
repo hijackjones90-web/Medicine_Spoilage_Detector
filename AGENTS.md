@@ -8,9 +8,11 @@ Submission deadline: **June 15, 2026**.
 
 ## Tech Stack
 
-- **Model:** `openbmb/MiniCPM-V-2_6` (8B params, runtime bitsandbytes INT4 quantized, served via vLLM on Modal)
+- **VLM Model:** `Qwen/Qwen2.5-VL-7B-Instruct` (7B params, runtime bitsandbytes INT4 quantized, served via vLLM on Modal)
+- **Orchestrator Model:** `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` (7B params, INT4, running on HF Spaces ZeroGPU)
 - **Frontend:** Gradio 6.17.3 on HuggingFace Spaces
-- **Backend:** Modal serverless GPU (L4) with vLLM inference
+- **VLM Backend:** Modal serverless GPU (L4) with vLLM inference
+- **Orchestrator Backend:** HuggingFace Spaces ZeroGPU (T4) with transformers inference
 - **Python:** 3.13
 - **Charts:** Plotly (interactive, renders in `gr.Plot`)
 - **Entry point:** `app.py` (declared in README.md frontmatter)
@@ -18,14 +20,16 @@ Submission deadline: **June 15, 2026**.
 ## Architecture
 
 ```
-HF Spaces (Gradio)                 Modal (GPU)
-┌──────────────────┐               ┌─────────────────────────┐
-│  app.py          │  HTTPS POST   │  backend.py             │
-│  engine.py  ─────┼──────────────►│  vLLM + MiniCPM-V 2.6   │
-│  prompts.py      │  JSON resp    │  INT4, L4 GPU, scales 0 │
-│  utils.py        │◄──────────────│  @fastapi_endpoint      │
-│  visualization.py│               │                         │
-└──────────────────┘               └─────────────────────────┘
+HF Spaces (Gradio)                         Modal (GPU)                 HF Spaces ZeroGPU (T4)
+┌──────────────────────┐         HTTPS POST ┌──────────────────┐  HTTPS POST ┌──────────────────────┐
+│  app.py              │         JSON resp  │  backend.py      │  JSON resp  │  DeepSeek-R1-        │
+│  orchestrator.py  ───┼──────────┬───────►│  vLLM + Qwen2.5- │────────────►│  Distill-Qwen-7B     │
+│  (calls engine.py)   │          │        │  VL-7B           │             │  INT4                │
+│  llm_client.py ──────┼──────────┘        │  INT4, L4 GPU    │             │  @spaces/ZeroGPU     │
+│  prompts.py          │◄─────────┴─────────│  scales to 0     │◄────────────│  synthesis only      │
+│  utils.py            │                     └──────────────────┘             └──────────────────────┘
+│  visualization.py    │
+└──────────────────────┘
 ```
 
 - **Frontend** (HF Spaces): Gradio UI, chart generation, spoilage scoring — no GPU needed
@@ -51,10 +55,14 @@ HF Spaces (Gradio)                 Modal (GPU)
 
 ```
 app.py              # Gradio Blocks UI — main entry point (HF Spaces)
-backend.py          # Modal deployment: vLLM + MiniCPM-V 2.6 INT4 on L4 GPU
+backend.py          # Modal deployment: vLLM + Qwen2.5-VL-7B INT4 on L4 GPU
 src/
 ├── __init__.py
+├── orchestrator.py # Orchestrator class + analyze_image() drop-in replacement
+├── llm_client.py   # Deepseek-R1 client with reasoning strip
+                     (remote via ZeroGPU endpoint or local transformers)
 ├── engine.py       # HTTPS client that calls Modal endpoint (two-pass pipeline)
+                     (low-level VLM client, now called by the orchestrator)
 ├── prompts.py      # VLM prompt templates with OCR context injection
 ├── utils.py        # Date parsing, chemical reference DB, spoilage scoring
 └── visualization.py # Plotly charts: chemical bar, timeline, gauge, radar
@@ -87,6 +95,8 @@ All prompts instruct the model to return **valid JSON only**. Regex fallback par
 **Optimization:** Pass 2 runs all 4 prompts in parallel via `ThreadPoolExecutor` (~4x speedup).
 
 **Prompt format:** Prompts use `{OCR_TEXT}` placeholder which is filled via Python's `.format()`. JSON examples in prompts must use escaped braces `{{ }}` to avoid `KeyError`.
+
+**Stage 3 — Deepseek R1 Synthesis:** After Pass 2 completes, the VLM JSON outputs are handed to the orchestrator stage (`deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` on HF Spaces ZeroGPU) for a **single synthesis call**. It reviews VLM output, corrects errors, and emits a final verdict + reasoning + confidence. Design principle: **no multi-step tool-calling loops** — VLM JSON is precomputed first, then one LLM call synthesizes it. This keeps latency acceptable on a 7B-class model. The Deepseek-R1 `...` chain-of-thought blocks are stripped by `strip_reasoning()` in `src/llm_client.py` before JSON parsing.
 
 ## Two-Mode Date System
 
@@ -128,9 +138,13 @@ When VLM can't extract certain data, Python calculates:
 
 ## Key Gotchas
 
-- Model repo is `openbmb/MiniCPM-V-2_6-int4` (note the underscore in `2_6`).
+- Model repo is `Qwen/Qwen2.5-VL-7B-Instruct`.
 - vLLM requires `--quantization bitsandbytes --load-format bitsandbytes` for INT4 models.
 - Modal endpoint URL is set via `MODAL_ENDPOINT_URL` environment variable (HF Spaces secret).
+- Deepseek R1 emits chain-of-thought in `...` blocks; `strip_reasoning()` removes them before JSON parsing.
+- Deepseek R1 synthesis is a single call, not a tool-calling loop (latency budget).
+- ZeroGPU runs on HF Spaces, not Modal; `ZEROGPU_ENDPOINT_URL` env var required.
+- Qwen2.5-VL-7B INT4 (~5GB VRAM) + Deepseek-R1-Distill-Qwen-7B INT4 (~5GB) fit on an L4 (24GB) / ZeroGPU T4 (16GB) with quantization.
 - Base64 encoding increases image payload ~33% — JPEG quality 95 preserves fine print.
 - Modal cold start takes ~30-60 sec after idle. First request may be slow.
 - vLLM serves an OpenAI-compatible API — no custom client code needed.
@@ -169,11 +183,23 @@ modal deploy backend.py
 # Prints the endpoint URL — save it
 ```
 
-### 2. Deploy HF Space frontend
+### 2. Deploy Deepseek R1 orchestrator Space (ZeroGPU)
+
+Create a separate HuggingFace Space with ZeroGPU hardware that serves `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` (INT4) behind an OpenAI-compatible endpoint. Save the resulting URL.
+
+```bash
+# In the orchestrator Space, expose an OpenAI-compatible chat endpoint
+# Requires HF Spaces ZeroGPU (T4) hardware
+```
+
+The orchestration service exposes an OpenAI-compatible endpoint; `src/llm_client.py` calls it via `ZEROGPU_ENDPOINT_URL`.
+
+### 3. Deploy HF Space frontend
 
 1. Set `MODAL_ENDPOINT_URL` as a Space secret (Settings → Secrets)
-2. Push code to the HF Space
-3. README.md frontmatter already declares `sdk: gradio`, `app_file: app.py`
+2. Set `ZEROGPU_ENDPOINT_URL` as a Space secret (Settings → Secrets)
+3. Push code to the HF Space
+4. README.md frontmatter already declares `sdk: gradio`, `app_file: app.py`
 
 ## Submission Checklist
 

@@ -3,10 +3,14 @@ import requests
 import json
 import base64
 import sys
+import os
 from PIL import Image
 import io
 
-url = "https://vishalsv2205--biochem-spoilage-detect-vlminference-analyze.modal.run"
+url = os.environ.get("MODAL_ENDPOINT_URL", "")
+if not url:
+    print("ERROR: MODAL_ENDPOINT_URL is not set. Deploy backend.py and export the URL.")
+    sys.exit(1)
 
 # Create a small test image
 img = Image.new("RGB", (100, 100), color=(255, 200, 150))

@@ -1,4 +1,4 @@
-"""Test script for OpenBMB MiniCPM-V optimizations."""
+"""Test script for OpenBMB MiniCPM-V optimizations (now Qwen2.5-VL)."""
 
 import sys
 import os
@@ -60,10 +60,8 @@ def test_backend_optimization():
     with open('backend.py', 'r') as f:
         content = f.read()
     
-    assert 'max_slice_nums' in content, "max_slice_nums not found in backend.py"
-    assert 'use_image_id' in content, "use_image_id not found in backend.py"
-    assert 'max-num-seqs' in content, "max-num-seqs not found in backend.py"
-    assert 'block-size' in content, "block-size not found in backend.py"
+    assert 'Qwen2.5-VL' in content or 'Qwen' in content, "Qwen model not found in backend.py"
+    assert 'bitsandbytes' in content, "bitsandbytes quantization not found in backend.py"
     print("[PASS] Backend optimization parameters present")
     
     return True
